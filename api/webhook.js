@@ -2,76 +2,104 @@ import express from "express";
 import Stripe from "stripe";
 import admin from "firebase-admin";
 import bodyParser from "body-parser";
+import dotenv from "dotenv";
 
 /* -----------------------------
-   FIREBASE ADMIN
+   🌱 ENV
+----------------------------- */
+dotenv.config();
+
+/* -----------------------------
+   🔥 FIREBASE ADMIN
 ----------------------------- */
 if (!admin.apps.length) {
+  if (
+    !process.env.FIREBASE_PROJECT_ID ||
+    !process.env.FIREBASE_CLIENT_EMAIL ||
+    !process.env.FIREBASE_PRIVATE_KEY
+  ) {
+    throw new Error("❌ Missing Firebase environment variables");
+  }
+
   admin.initializeApp({
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
     }),
   });
 }
+
 const db = admin.firestore();
 
 /* -----------------------------
-   STRIPE
+   ⚡ STRIPE
 ----------------------------- */
+if (!process.env.STRIPE_SECRET_KEY) {
+  throw new Error("❌ STRIPE_SECRET_KEY is missing");
+}
+
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
 });
 
 /* -----------------------------
-   EXPRESS SERVER
------------------------------ */
-const app = express();
-
-/* -----------------------------
-   WEBHOOK SECRETS (TEST + PROD)
+   🔐 WEBHOOK SECRETS (TEST + PROD)
 ----------------------------- */
 const webhookSecrets = [
   process.env.STRIPE_WEBHOOK_SECRET,
   process.env.STRIPE_WEBHOOK_SECRET_TEST,
 ].filter(Boolean);
 
+if (webhookSecrets.length === 0) {
+  throw new Error("❌ No Stripe webhook secret configured");
+}
+
 /* -----------------------------
-   STRIPE PRICE → ROLE MAPPING
-   (tu rempliras les IDs après)
+   🎯 PRICE → ROLE
 ----------------------------- */
 const PLAN_BY_PRICE = {
   // TEST
-  "price_1SfKHZP1mCgTuXtUMhCioSyC": "premium",
-  "price_1SfKIFP1mCgTuXtUVMe9Vewl": "premium",
+  price_1SfKHZP1mCgTuXtUMhCioSyC: "premium",
+  price_1SfKIFP1mCgTuXtUVMe9Vewl: "premium",
 
   // PROD
-  "price_1SfJn1P1mCgTuXtUUrNs0bpU": "premium",
-  "price_1SFj04P1mCgTuXtUrB6xIJ87": "premium",
+  price_1SfJn1P1mCgTuXtUUrNs0bpU: "premium",
+  price_1SFj04P1mCgTuXtUrB6xIJ87: "premium",
 };
 
+/* -----------------------------
+   🚀 EXPRESS APP
+----------------------------- */
+const app = express();
 
 /* -----------------------------
-   STRIPE WEBHOOK
+   🧪 HEALTH CHECK
+----------------------------- */
+app.get("/", (_req, res) => {
+  res.json({ status: "Edmem webhook running 🚀" });
+});
+
+/* -----------------------------
+   🔔 STRIPE WEBHOOK
 ----------------------------- */
 app.post(
-  "/webhook",
+  "/api/webhook",
   bodyParser.raw({ type: "application/json" }),
   async (req, res) => {
     const sig = req.headers["stripe-signature"];
-    let event = null;
+    let event;
 
-    // 🔐 Essaye tous les secrets (test + prod)
+    // 🔐 Vérification signature (test + prod)
     for (const secret of webhookSecrets) {
       try {
         event = stripe.webhooks.constructEvent(req.body, sig, secret);
         break;
-      } catch (e) {}
+      } catch {}
     }
 
     if (!event) {
-      console.error("❌ Webhook signature invalid (test + prod failed)");
+      console.error("❌ Invalid Stripe signature");
       return res.status(400).send("Webhook Error");
     }
 
@@ -86,33 +114,27 @@ app.post(
 
         if (!email || !session.subscription) {
           console.warn("⚠️ Missing email or subscription");
-          return res.sendStatus(200);
+          return res.json({ received: true });
         }
 
-        // 🔎 Récupère la subscription pour avoir le price réel
+        // 🔎 Récupération subscription
         const subscription = await stripe.subscriptions.retrieve(
           session.subscription
         );
 
-        const priceId =
-          subscription.items.data[0]?.price?.id || null;
-
-        if (!priceId) {
-          console.warn("⚠️ No priceId found in subscription");
-          return res.sendStatus(200);
-        }
-
+        const priceId = subscription.items.data[0]?.price?.id;
         const role = PLAN_BY_PRICE[priceId];
 
         if (!role) {
-          console.warn("⚠️ Unknown Stripe price:", priceId);
-          return res.sendStatus(200);
+          console.warn("⚠️ Unknown price:", priceId);
+          return res.json({ received: true });
         }
 
-        // 🔄 Update Firestore user
+        // 🔄 Firestore update
         const snap = await db
           .collection("users")
           .where("email", "==", email)
+          .limit(1)
           .get();
 
         if (!snap.empty) {
@@ -126,20 +148,28 @@ app.post(
 
           console.log(`🔥 ${email} devient ${role.toUpperCase()}`);
         } else {
-          console.warn(`⚠️ Aucun user trouvé pour ${email}`);
+          console.warn(`⚠️ Aucun user pour ${email}`);
         }
       }
-    } catch (e) {
-      console.error("❌ Webhook handling error:", e);
+    } catch (err) {
+      console.error("❌ Webhook processing error:", err);
     }
 
-    res.sendStatus(200);
+    res.json({ received: true });
   }
 );
 
 /* -----------------------------
-   SERVER
+   ▶️ LOCAL SERVER (DEV)
 ----------------------------- */
-app.listen(4242, () =>
-  console.log("🚀 Webhook serveur running on port 4242")
-);
+if (process.env.NODE_ENV !== "production") {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`✅ Webhook listening on http://localhost:${PORT}`);
+  });
+}
+
+/* -----------------------------
+   ✅ EXPORT (Vercel / Serverless)
+----------------------------- */
+export default app;
