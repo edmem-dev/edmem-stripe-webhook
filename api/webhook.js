@@ -82,9 +82,10 @@ app.get("/", (_req, res) => {
 
 /* -----------------------------
    🔔 STRIPE WEBHOOK
+   (route = /api/webhook)
 ----------------------------- */
 app.post(
-  "/api/webhook",
+  "/",
   bodyParser.raw({ type: "application/json" }),
   async (req, res) => {
     const sig = req.headers["stripe-signature"];
@@ -160,16 +161,6 @@ app.post(
 );
 
 /* -----------------------------
-   ▶️ LOCAL SERVER (DEV)
------------------------------ */
-if (process.env.NODE_ENV !== "production") {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`✅ Webhook listening on http://localhost:${PORT}`);
-  });
-}
-
-/* -----------------------------
-   ✅ EXPORT (Vercel / Serverless)
+   ✅ EXPORT (Vercel Serverless)
 ----------------------------- */
 export default app;
