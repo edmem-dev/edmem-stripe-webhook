@@ -1,18 +1,17 @@
 {
-  "name": "backend-edmem",
+  "name": "edmem-stripe-webhook",
   "version": "1.0.0",
-  "main": "webhook.js",
+  "type": "module",
+  "main": "api/webhook.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node api/webhook.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
-    "body-parser": "^2.2.0",
-    "express": "^5.1.0",
-    "firebase-admin": "^13.6.0",
-    "stripe": "^20.0.0"
+    "express": "^4.19.2",
+    "body-parser": "^1.20.2",
+    "firebase-admin": "^12.0.0",
+    "stripe": "^14.21.0",
+    "mime-db": "^1.52.0",
+    "mime-types": "^2.1.35"
   }
 }
