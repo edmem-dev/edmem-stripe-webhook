@@ -1,7 +1,17 @@
-# Secrets
-.env
-.env.local
-.env.*.local
+# Dependencies
+node_modules/
 
-# Node
-node_modules
+# Env
+.env
+
+# Firebase keys
+serviceAccountKey.json
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
