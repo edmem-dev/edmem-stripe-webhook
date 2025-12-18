@@ -44,16 +44,13 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 });
 
 /* -----------------------------
-   🔐 WEBHOOK SECRETS (TEST + PROD)
+   🔐 WEBHOOK SECRET
 ----------------------------- */
-const webhookSecrets = [
-  process.env.STRIPE_WEBHOOK_SECRET,
-  process.env.STRIPE_WEBHOOK_SECRET_TEST,
-].filter(Boolean);
-
-if (webhookSecrets.length === 0) {
-  throw new Error("❌ No Stripe webhook secret configured");
+if (!process.env.STRIPE_WEBHOOK_SECRET) {
+  throw new Error("❌ STRIPE_WEBHOOK_SECRET is missing");
 }
+
+const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
 /* -----------------------------
    🎯 PRICE → ROLE
@@ -77,30 +74,28 @@ const app = express();
    🧪 HEALTH CHECK
 ----------------------------- */
 app.get("/", (_req, res) => {
-  res.json({ status: "Edmem webhook running 🚀" });
+  res.status(200).json({ status: "Edmem webhook running 🚀" });
 });
 
 /* -----------------------------
    🔔 STRIPE WEBHOOK
-   (route = /api/webhook)
+   URL = /api/webhook
 ----------------------------- */
 app.post(
-  "/",
-  bodyParser.raw({ type: "application/json" }),
+  "/api/webhook",
+  bodyParser.raw({ type: "*/*" }), // ⚠️ OBLIGATOIRE POUR STRIPE
   async (req, res) => {
     const sig = req.headers["stripe-signature"];
     let event;
 
-    // 🔐 Vérification signature (test + prod)
-    for (const secret of webhookSecrets) {
-      try {
-        event = stripe.webhooks.constructEvent(req.body, sig, secret);
-        break;
-      } catch {}
-    }
-
-    if (!event) {
-      console.error("❌ Invalid Stripe signature");
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        WEBHOOK_SECRET
+      );
+    } catch (err) {
+      console.error("❌ Invalid Stripe signature:", err.message);
       return res.status(400).send("Webhook Error");
     }
 
@@ -118,7 +113,6 @@ app.post(
           return res.json({ received: true });
         }
 
-        // 🔎 Récupération subscription
         const subscription = await stripe.subscriptions.retrieve(
           session.subscription
         );
@@ -131,7 +125,6 @@ app.post(
           return res.json({ received: true });
         }
 
-        // 🔄 Firestore update
         const snap = await db
           .collection("users")
           .where("email", "==", email)
