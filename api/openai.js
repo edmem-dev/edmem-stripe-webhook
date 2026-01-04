@@ -1,7 +1,9 @@
 /* api/openai.js
    Vercel Serverless Function (Node 18+)
-   - POST JSON -> /v1/chat/completions
-   - POST multipart -> /v1/audio/transcriptions
+   - POST application/json -> OpenAI chat completions
+   - POST multipart/form-data -> OpenAI audio transcriptions
+   - CORS OK + OPTIONS 204
+   - Firebase ID token verify (si env Firebase présents)
 */
 
 function handleCors(req, res) {
@@ -22,7 +24,7 @@ async function readBody(req) {
   return Buffer.concat(chunks);
 }
 
-async function verifyFirebaseToken(req) {
+async function verifyFirebaseTokenIfPossible(req) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
@@ -32,7 +34,6 @@ async function verifyFirebaseToken(req) {
     throw err;
   }
 
-  // Import dynamique pour ne jamais casser le CORS preflight
   const adminMod = await import("firebase-admin");
   const admin = adminMod.default;
 
@@ -42,7 +43,7 @@ async function verifyFirebaseToken(req) {
     const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
 
     if (!projectId || !clientEmail || !privateKey) {
-      // Si tu veux rendre Firebase obligatoire, remplace par throw 500
+      // Si tu veux rendre Firebase obligatoire, remplace par throw new Error(...)
       console.warn("⚠️ Firebase Admin env manquants, verification skipped");
       return;
     }
@@ -59,8 +60,18 @@ async function verifyFirebaseToken(req) {
   await admin.auth().verifyIdToken(token);
 }
 
+async function parseOpenAIResponse(r) {
+  const ct = r.headers.get("content-type") || "";
+  if (ct.includes("application/json")) {
+    return await r.json();
+  }
+  const text = await r.text();
+  // si OpenAI renvoie du "text", on normalise en { text }
+  return { text };
+}
+
 export default async function handler(req, res) {
-  // ✅ CORS d’abord, toujours
+  // ✅ CORS en premier
   if (handleCors(req, res)) return;
 
   if (req.method !== "POST") {
@@ -75,8 +86,8 @@ export default async function handler(req, res) {
   const contentType = req.headers["content-type"] || "";
 
   try {
-    // 🔐 Auth Firebase (comme ton ChatBot)
-    await verifyFirebaseToken(req);
+    // 🔐 Firebase auth (Bearer)
+    await verifyFirebaseTokenIfPossible(req);
 
     // ====== CHAT (JSON) ======
     if (contentType.includes("application/json")) {
@@ -92,8 +103,8 @@ export default async function handler(req, res) {
         body: JSON.stringify(body),
       });
 
-      const json = await r.json();
-      return res.status(r.status).json(json);
+      const data = await parseOpenAIResponse(r);
+      return res.status(r.status).json(data);
     }
 
     // ====== AUDIO (multipart/form-data) ======
@@ -104,19 +115,21 @@ export default async function handler(req, res) {
         method: "POST",
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": contentType, // garder le boundary !
+          "Content-Type": contentType, // important: garder boundary
         },
         body: rawBody,
       });
 
-      const json = await r.json();
-      return res.status(r.status).json(json);
+      const data = await parseOpenAIResponse(r);
+      return res.status(r.status).json(data);
     }
 
     return res.status(400).json({ error: "Unsupported content type" });
   } catch (e) {
-    const code = e?.code === 401 ? 401 : 500;
+    const status = e?.code === 401 ? 401 : 500;
     console.error("❌ /api/openai error:", e);
-    return res.status(code).json({ error: code === 401 ? "Unauthorized" : "Server error" });
+    return res.status(status).json({
+      error: status === 401 ? "Unauthorized" : "Server error",
+    });
   }
 }
