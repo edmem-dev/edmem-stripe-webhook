@@ -1,10 +1,22 @@
 import admin from "firebase-admin";
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", process.env.CORS_ORIGIN || "*");
+/* ===================== CORS ===================== */
+
+function applyCors(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  // 🔴 PRE-FLIGHT CORS (CRITIQUE)
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return true; // stop execution
+  }
+
+  return false;
 }
+
+/* ===================== FIREBASE ===================== */
 
 function initFirebaseAdmin() {
   if (admin.apps.length) return;
@@ -14,51 +26,43 @@ function initFirebaseAdmin() {
   const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
 
   if (!projectId || !clientEmail || !privateKey) {
-    throw new Error("Missing Firebase Admin env vars");
+    console.warn("⚠️ Firebase Admin not configured (auth skipped)");
+    return;
   }
 
   admin.initializeApp({
-    credential: admin.credential.cert({ projectId, clientEmail, privateKey }),
+    credential: admin.credential.cert({
+      projectId,
+      clientEmail,
+      privateKey,
+    }),
   });
 }
 
-async function readRawBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
-  });
-}
-
-async function requireFirebaseAuth(req) {
+async function verifyAuth(req) {
   initFirebaseAdmin();
+  if (!admin.apps.length) return;
 
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith("Bearer ")) return;
 
-  if (!token) {
-    const err = new Error("Missing auth token");
-    err.statusCode = 401;
-    throw err;
-  }
-
+  const token = auth.slice(7);
   await admin.auth().verifyIdToken(token);
 }
 
+/* ===================== HANDLER ===================== */
+
 export default async function handler(req, res) {
-  setCors(res);
+  // ✅ CORS FIRST — ALWAYS
+  if (applyCors(req, res)) return;
 
-  if (req.method === "OPTIONS") {
-    return res.status(204).send("");
-  }
-
+  // ❌ ONLY POST
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    await requireFirebaseAuth(req);
+    await verifyAuth(req);
 
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
     if (!OPENAI_API_KEY) {
@@ -67,16 +71,9 @@ export default async function handler(req, res) {
 
     const contentType = req.headers["content-type"] || "";
 
-    // -----------------------------
-    // 1) CHAT (JSON) -> /chat/completions
-    // -----------------------------
+    /* ========== CHAT ========= */
     if (contentType.includes("application/json")) {
-      // Vercel peut parser req.body, sinon on lit le raw
-      let body = req.body;
-      if (!body || typeof body === "string") {
-        const raw = await readRawBody(req);
-        body = raw.length ? JSON.parse(raw.toString("utf8")) : {};
-      }
+      const body = req.body;
 
       const r = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -91,28 +88,28 @@ export default async function handler(req, res) {
       return res.status(r.status).json(json);
     }
 
-    // -----------------------------
-    // 2) TRANSCRIBE (multipart) -> /audio/transcriptions
-    // -----------------------------
+    /* ========== AUDIO ========= */
     if (contentType.includes("multipart/form-data")) {
-      const raw = await readRawBody(req);
+      const buffers = [];
+      for await (const chunk of req) buffers.push(chunk);
+      const rawBody = Buffer.concat(buffers);
 
       const r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": contentType, // garde le boundary d'origine
+          "Content-Type": contentType, // ⚠️ keep boundary
         },
-        body: raw,
+        body: rawBody,
       });
 
       const json = await r.json();
       return res.status(r.status).json(json);
     }
 
-    return res.status(400).json({ error: "Unsupported content-type" });
+    return res.status(400).json({ error: "Unsupported content type" });
   } catch (e) {
-    const status = e?.statusCode || 500;
-    return res.status(status).json({ error: e?.message || "Server error" });
+    console.error("❌ OpenAI proxy error:", e);
+    return res.status(500).json({ error: "Server error" });
   }
 }
