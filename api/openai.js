@@ -1,6 +1,9 @@
-/* ===================== NO IMPORTS BEFORE CORS ===================== */
+/* api/openai.js
+   Vercel Serverless Function (Node 18+)
+   - POST JSON -> /v1/chat/completions
+   - POST multipart -> /v1/audio/transcriptions
+*/
 
-/* ===================== CORS ===================== */
 function handleCors(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -13,16 +16,51 @@ function handleCors(req, res) {
   return false;
 }
 
-/* ===================== BODY READER ===================== */
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   return Buffer.concat(chunks);
 }
 
-/* ===================== HANDLER ===================== */
+async function verifyFirebaseToken(req) {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+  if (!token) {
+    const err = new Error("Missing auth token");
+    err.code = 401;
+    throw err;
+  }
+
+  // Import dynamique pour ne jamais casser le CORS preflight
+  const adminMod = await import("firebase-admin");
+  const admin = adminMod.default;
+
+  if (!admin.apps.length) {
+    const projectId = process.env.FIREBASE_PROJECT_ID;
+    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+    const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+
+    if (!projectId || !clientEmail || !privateKey) {
+      // Si tu veux rendre Firebase obligatoire, remplace par throw 500
+      console.warn("⚠️ Firebase Admin env manquants, verification skipped");
+      return;
+    }
+
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId,
+        clientEmail,
+        privateKey,
+      }),
+    });
+  }
+
+  await admin.auth().verifyIdToken(token);
+}
+
 export default async function handler(req, res) {
-  // 🔴 CORS MUST BE FIRST
+  // ✅ CORS d’abord, toujours
   if (handleCors(req, res)) return;
 
   if (req.method !== "POST") {
@@ -37,7 +75,10 @@ export default async function handler(req, res) {
   const contentType = req.headers["content-type"] || "";
 
   try {
-    /* ================= CHAT ================= */
+    // 🔐 Auth Firebase (comme ton ChatBot)
+    await verifyFirebaseToken(req);
+
+    // ====== CHAT (JSON) ======
     if (contentType.includes("application/json")) {
       const raw = await readBody(req);
       const body = JSON.parse(raw.toString("utf8"));
@@ -55,7 +96,7 @@ export default async function handler(req, res) {
       return res.status(r.status).json(json);
     }
 
-    /* ================= AUDIO ================= */
+    // ====== AUDIO (multipart/form-data) ======
     if (contentType.includes("multipart/form-data")) {
       const rawBody = await readBody(req);
 
@@ -63,7 +104,7 @@ export default async function handler(req, res) {
         method: "POST",
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": contentType, // keep boundary
+          "Content-Type": contentType, // garder le boundary !
         },
         body: rawBody,
       });
@@ -74,7 +115,8 @@ export default async function handler(req, res) {
 
     return res.status(400).json({ error: "Unsupported content type" });
   } catch (e) {
-    console.error("❌ OpenAI proxy error:", e);
-    return res.status(500).json({ error: "Server error" });
+    const code = e?.code === 401 ? 401 : 500;
+    console.error("❌ /api/openai error:", e);
+    return res.status(code).json({ error: code === 401 ? "Unauthorized" : "Server error" });
   }
 }
